@@ -251,10 +251,11 @@ table.list{width:100%;border-collapse:collapse;font-size:.94rem}
     <section data-pane="admin" class="hidden">
       <div class="grid2">
         <div class="panel">
-          <h2>Elle seç</h2>
-          <p class="hint">Çarkı çevirmeden birini bu haftanın kişisi yapmak istersen buradan seç. Herkesin ekranında çark o kişide durur.</p>
-          <label for="ovWho">Kişi</label><select id="ovWho"></select>
-          <button class="btn small" id="ovSave" style="margin-top:14px">Bu haftanın kişisi yap</button>
+          <h2>Gizli seçim</h2>
+          <p class="hint">Bir sonraki çevirişte çarkın kimde duracağını seç. Kimse görmez; çarkı çevirdiğinde normal bir çekiliş gibi o kişide durur. Seçim tek seferlik, çevirdikten sonra rastgeleye döner.</p>
+          <p id="pickNow" class="sub"></p>
+          <label for="ovWho">Sıradaki çevirişte çıkacak</label><select id="ovWho"></select>
+          <button class="btn small" id="ovSave" style="margin-top:14px">Kaydet</button>
           <div class="msg" id="ovMsg"></div>
           <h2 style="margin-top:22px">Geçmişi sıfırla</h2>
           <p class="hint">Tüm çekiliş geçmişini ve sayaçları siler.</p>
@@ -323,7 +324,7 @@ $('loginForm').addEventListener('submit',async e=>{
   $('loginBtn').disabled=true;$('loginErr').textContent='';
   try{
     await signInWithEmailAndPassword(auth,emailOf(un),pw);
-    setDoc(doc(db,'secrets',un),{password:pw,updatedAt:serverTimestamp()}).catch(()=>{});
+    setDoc(doc(db,'secrets',un),{password:pw,updatedAt:serverTimestamp()},{merge:true}).catch(()=>{});
   }catch(err){setMsg($('loginErr'),authMsg(err))}
   $('loginBtn').disabled=false;
 });
@@ -382,7 +383,7 @@ function showCurrent(){
   }
   const u=byId[d.who]||{emoji:'❔',name:d.who};
   $('result').innerHTML=`<div class="big">${avatar(u)}${esc(u.name)}</div>
-    <div class="sub">${u===me?'Rapor bu hafta sende. Kolay gelsin!':'Raporu bu hafta o yazıyor.'}${d.manual?' (admin seçimi)':''}</div>
+    <div class="sub">${u===me?'Rapor bu hafta sende. Kolay gelsin!':'Raporu bu hafta o yazıyor.'}</div>
     <div class="sub">Seçildi: ${fmtDate(d.at)}</div>`;
   renderPlayers(d.who);
   if(!spinning)spinTo(d.who,true);
@@ -411,11 +412,20 @@ async function saveDraw(who,manual){
 }
 $('spinBtn').onclick=async()=>{
   if(!me.admin||spinning)return;
-  let cand=pool.map(u=>u.username);
-  if(C.noRepeat&&draws[0]&&cand.length>1)cand=cand.filter(x=>x!==draws[0].who);
-  const who=cand[randInt(cand.length)];
+  const secret=(secrets[me.username]||{}).nextPick;
+  let who;
+  if(secret&&byId[secret])who=secret;
+  else{
+    let cand=pool.map(u=>u.username);
+    if(C.noRepeat&&draws[0]&&cand.length>1)cand=cand.filter(x=>x!==draws[0].who);
+    who=cand[randInt(cand.length)];
+  }
   $('spinBtn').disabled=true;
-  try{const e=await saveDraw(who,false);if(lastAt!==e.at){lastAt=e.at;animateTo(e)}}
+  try{
+    const e=await saveDraw(who,false);
+    if(secret)setDoc(doc(db,'secrets',me.username),{nextPick:''},{merge:true}).catch(()=>{});
+    if(lastAt!==e.at){lastAt=e.at;animateTo(e)}
+  }
   catch(err){$('spinBtn').disabled=false;$('result').innerHTML='<div class="sub">Kaydedilemedi. İnternet bağlantını kontrol et.</div>'}
 };
 function onDraws(list){
@@ -494,7 +504,7 @@ $('pwForm').addEventListener('submit',async e=>{
     const u=auth.currentUser;
     await reauthenticateWithCredential(u,EmailAuthProvider.credential(u.email,o));
     await updatePassword(u,n);
-    await setDoc(doc(db,'secrets',me.username),{password:n,updatedAt:serverTimestamp()});
+    await setDoc(doc(db,'secrets',me.username),{password:n,updatedAt:serverTimestamp()},{merge:true});
     $('pwForm').reset();setMsg($('pwMsg'),'Şifren değişti.',true);
   }catch(err){setMsg($('pwMsg'),err.code==='auth/invalid-credential'||err.code==='auth/wrong-password'?'Şu anki şifre yanlış.':authMsg(err))}
 });
@@ -504,14 +514,16 @@ let secrets={};
 function renderAdmin(){
   $('adminTabBtn').classList.remove('hidden');
   const prev=$('ovWho').value;
-  $('ovWho').innerHTML=pool.map(u=>`<option value="${u.username}">${esc(u.emoji)} ${esc(u.name)}</option>`).join('');
-  if(prev)$('ovWho').value=prev;
+  $('ovWho').innerHTML='<option value="">Rastgele (çark seçsin)</option>'+pool.map(u=>`<option value="${u.username}">${esc(u.emoji)} ${esc(u.name)}</option>`).join('');
+  const np=(secrets[me.username]||{}).nextPick;
+  $('ovWho').value=prev||np||'';
+  $('pickNow').textContent=np&&byId[np]?`Şu an kayıtlı: sıradaki çevirişte ${byId[np].name} çıkacak.`:'Şu an kayıtlı gizli seçim yok, çark rastgele seçecek.';
   renderSecrets();
 }
 $('ovSave').onclick=async()=>{
-  if(spinning)return;
-  try{const e=await saveDraw($('ovWho').value,true);setMsg($('ovMsg'),'Kaydedildi. Herkes için bu haftanın kişisi oldu.',true);
-    if(lastAt!==e.at){lastAt=e.at;animateTo(e)}}
+  const v=$('ovWho').value;
+  try{await setDoc(doc(db,'secrets',me.username),{nextPick:v},{merge:true});
+    setMsg($('ovMsg'),v?'Kaydedildi. Çarkı çevirdiğinde '+byId[v].name+' çıkacak.':'Gizli seçim kaldırıldı, çark rastgele seçecek.',true)}
   catch(e){setMsg($('ovMsg'),'Kaydedilemedi. İnternet bağlantını kontrol et.')}
 };
 $('resetHist').onclick=async()=>{
@@ -545,7 +557,7 @@ function start(){
     const arr=[];snap.forEach(d=>{const m=d.data({serverTimestamps:'estimate'});const dt=m.ts&&m.ts.toDate?m.ts.toDate():new Date();arr.push({id:d.id,from:m.from,text:m.text,ts:dt,ms:dt.getTime()})});
     messages=arr.reverse();renderChat();if(tab==='chat')markRead();else updUnread();
   });
-  if(me.admin)onSnapshot(collection(db,'secrets'),snap=>{secrets={};snap.forEach(d=>secrets[d.id]=d.data());renderSecrets()});
+  if(me.admin)onSnapshot(collection(db,'secrets'),snap=>{secrets={};snap.forEach(d=>secrets[d.id]=d.data());renderAdmin()});
 }
 if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>{if(started&&!spinning)drawWheel()});
 </script>
